@@ -444,6 +444,8 @@ const Logic = (() => {
   const SHOW = 15;       // list length
   const STREETS_FOR = 10; // boxes that get a street label
   const STORE_KEY = 'nearest-mailbox:last';
+  const HEDGE_MS = 3000; // wait before the second Overpass server is asked
+  const CAP_MS = 9000;   // longest wait for Overpass before the backup source is used
 
   const $ = id => document.getElementById(id);
   const statusEl = $('status'), listEl = $('boxes'), listHead = $('listHead');
@@ -535,57 +537,136 @@ const Logic = (() => {
   }
 
   // ---------- data ----------
-  async function overpass(query) {
-    let lastErr = new Error('No Overpass server answered');
-    for (const url of OVERPASS) {
-      const ctl = new AbortController();
-      const timer = setTimeout(() => ctl.abort(), 25000);
-      try {
-        const res = await fetch(url, {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  // The public Overpass servers are often overloaded. One request goes to the first
+  // server. The second server gets the same request only if the first server fails
+  // or stays silent for HEDGE_MS. Nothing is retried. The whole attempt ends at CAP_MS.
+  function overpass(query) {
+    return new Promise((resolve, reject) => {
+      const ctls = [];
+      let next = 0, pending = 0, settled = false, lastErr = new Error('no answer');
+      const finish = (fn, val) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(hedge);
+        clearTimeout(cap);
+        ctls.forEach(c => c.abort());
+        fn(val);
+      };
+      const start = () => {
+        if (settled || next >= OVERPASS.length) return;
+        const url = OVERPASS[next++];
+        const ctl = new AbortController();
+        ctls.push(ctl);
+        pending++;
+        fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: 'data=' + encodeURIComponent(query),
           signal: ctl.signal
+        }).then(res => {
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          return res.json();
+        }).then(json => finish(resolve, json.elements || []), err => {
+          lastErr = err;
+          pending--;
+          if (next < OVERPASS.length) start();
+          else if (pending === 0) finish(reject, lastErr);
         });
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const json = await res.json();
-        return json.elements || [];
-      } catch (e) {
-        lastErr = e;
-      } finally {
-        clearTimeout(timer);
-      }
-    }
-    throw lastErr;
+      };
+      const hedge = setTimeout(start, HEDGE_MS);
+      const cap = setTimeout(() => finish(reject, new Error('timed out')), CAP_MS);
+      start();
+    });
   }
 
-  async function findBoxes(o) {
-    let found = [], radius = RADII_M[0];
-    for (radius of RADII_M) {
-      const q = '[out:json][timeout:20];node["amenity"="post_box"](around:' + radius + ',' +
-        o.lat.toFixed(6) + ',' + o.lon.toFixed(6) + ');out body;';
-      const els = await overpass(q);
-      found = els
-        .filter(e => e.type === 'node' && Number.isFinite(e.lat) && Number.isFinite(e.lon))
-        .map(e => ({ id: e.id, lat: e.lat, lon: e.lon, tags: e.tags || {}, kind: Logic.classify(e.tags) }))
-        .filter(b => b.kind !== 'other');
-      if (found.length >= WANT) break;
-    }
+  function finishBoxes(o, found) {
     for (const b of found) {
+      b.kind = Logic.classify(b.tags);
       b.dist = Logic.distance(o, b);
       b.dir = Logic.compass(Logic.bearing(o, b));
       b.sched = Logic.parseCollectionTimes(b.tags.collection_times);
     }
-    found.sort((a, b) => a.dist - b.dist);
-    return { list: found.slice(0, SHOW), total: found.length, radius };
+    return found.filter(b => b.kind !== 'other').sort((a, b) => a.dist - b.dist);
+  }
+
+  async function findViaOverpass(o) {
+    let found = [], radius = RADII_M[0];
+    for (radius of RADII_M) {
+      const q = '[out:json][timeout:8];node["amenity"="post_box"](around:' + radius + ',' +
+        o.lat.toFixed(6) + ',' + o.lon.toFixed(6) + ');out body;';
+      const els = await overpass(q);
+      found = finishBoxes(o, els
+        .filter(e => e.type === 'node' && Number.isFinite(e.lat) && Number.isFinite(e.lon))
+        .map(e => ({ id: 'n' + e.id, lat: e.lat, lon: e.lon, tags: e.tags || {} })));
+      if (found.length >= WANT) break;
+    }
+    return { list: found.slice(0, SHOW), total: found.length, radius, source: 'overpass' };
+  }
+
+  // Nominatim allows one request per second.
+  let lastNominatim = 0;
+  async function nominatim(params) {
+    const wait = lastNominatim + 1100 - Date.now();
+    if (wait > 0) await sleep(wait);
+    lastNominatim = Date.now();
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 12000);
+    try {
+      const res = await fetch('https://nominatim.openstreetmap.org/search?format=jsonv2&' + params, { signal: ctl.signal });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return await res.json();
+    } catch (e) {
+      throw e.name === 'AbortError' ? new Error('timed out') : e;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // Backup source. Nominatim returns at most 40 places of one kind inside a box,
+  // so the box shrinks when the limit is hit and grows when few boxes are found.
+  async function findViaNominatim(o) {
+    let half = 800, found = [], grew = false, shrank = false;
+    for (let tries = 0; tries < 3; tries++) {
+      const dLat = half / 110540, dLon = half / (111320 * Math.cos(o.lat * Math.PI / 180));
+      const viewbox = [o.lon - dLon, o.lat + dLat, o.lon + dLon, o.lat - dLat].map(n => n.toFixed(6)).join(',');
+      const hits = await nominatim('q=' + encodeURIComponent('[post box]') + '&viewbox=' + viewbox +
+        '&bounded=1&limit=40&extratags=1&addressdetails=1');
+      found = finishBoxes(o, hits
+        .filter(h => h.type === 'post_box' && Number.isFinite(Number(h.lat)) && Number.isFinite(Number(h.lon)))
+        .map(h => ({
+          id: String(h.osm_type || 'x').charAt(0) + h.osm_id,
+          lat: Number(h.lat), lon: Number(h.lon),
+          tags: Object.assign({}, h.extratags || {}, h.name ? { name: h.name } : {}),
+          street: (h.address && h.address.road) || ''
+        })));
+      if (hits.length >= 40 && half > 250 && !grew) { half /= 2; shrank = true; }
+      else if (found.length < WANT && half < 7000 && !shrank) { half *= 3; grew = true; }
+      else break;
+    }
+    return { list: found.slice(0, SHOW), total: found.length, radius: half, source: 'nominatim' };
+  }
+
+  let overpassDownUntil = 0;
+  async function findBoxes(o, onFallback) {
+    if (Date.now() >= overpassDownUntil) {
+      try {
+        return await findViaOverpass(o);
+      } catch (e) {
+        overpassDownUntil = Date.now() + 5 * 60 * 1000;
+      }
+    }
+    onFallback();
+    return findViaNominatim(o);
   }
 
   async function labelStreets(token) {
-    const targets = boxes.slice(0, STREETS_FOR).filter(b => !tagAddress(b.tags));
-    if (!targets.length) return;
+    const targets = boxes.slice(0, STREETS_FOR).filter(b => !tagAddress(b.tags) && !b.street);
+    if (!targets.length || Date.now() < overpassDownUntil) return;
     const parts = targets.map(b => 'way(around:45,' + b.lat.toFixed(6) + ',' + b.lon.toFixed(6) + ')["highway"]["name"];').join('');
     let ways;
-    try { ways = await overpass('[out:json][timeout:20];(' + parts + ');out tags geom;'); }
+    try { ways = await overpass('[out:json][timeout:8];(' + parts + ');out tags geom;'); }
     catch (e) { return; } // street names are an extra; the list is usable without them
     if (token !== searchToken) return;
     for (const b of targets) {
@@ -682,11 +763,12 @@ const Logic = (() => {
     setStatus('Looking for collection boxes near ' + o.label + '…');
     let result;
     try {
-      result = await findBoxes(o);
+      result = await findBoxes(o, () => {
+        if (token === searchToken) setStatus('The main data server is busy. Asking the backup source…');
+      });
     } catch (e) {
       if (token !== searchToken) return;
-      setStatus('The map data server did not answer (' + (e.name === 'AbortError' ? 'timed out' : e.message) +
-        '). Wait a minute, then try again.', true);
+      setStatus('Both map data sources failed (backup source: ' + e.message + '). Try again in a few minutes.', true);
       return;
     }
     if (token !== searchToken) return;
@@ -700,9 +782,11 @@ const Logic = (() => {
     }
     drawPins();
     const acc = o.accuracy ? ' Location accuracy: about ' + Logic.formatDistance(o.accuracy) + '.' : '';
+    const backup = result.source === 'nominatim'
+      ? ' The main data server was busy, so this list comes from the backup source. The backup source can miss boxes.' : '';
     setStatus((note || '') + result.total + ' mapped ' + (result.total === 1 ? 'box' : 'boxes') + ' within ' +
       Logic.formatDistance(result.radius) + ' of ' + o.label + '. Closest: ' +
-      Logic.formatDistance(boxes[0].dist) + ' to the ' + boxes[0].dir + '.' + acc);
+      Logic.formatDistance(boxes[0].dist) + ' to the ' + boxes[0].dir + '.' + acc + backup);
     labelStreets(token);
   }
 
@@ -733,9 +817,7 @@ const Logic = (() => {
     $('addrBtn').disabled = true;
     setStatus('Looking up "' + text + '"…');
     try {
-      const res = await fetch('https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&countrycodes=us&q=' + encodeURIComponent(text));
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const hits = await res.json();
+      const hits = await nominatim('limit=1&countrycodes=us&q=' + encodeURIComponent(text));
       if (!hits.length) { setStatus('No US address matched "' + text + '". Add a city or ZIP code.', true); return; }
       const label = String(hits[0].display_name || text).split(',').slice(0, 2).join(',').trim();
       const o = { lat: Number(hits[0].lat), lon: Number(hits[0].lon), label };
