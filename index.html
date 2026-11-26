@@ -1,0 +1,770 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<meta name="theme-color" content="#24478f">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Mailbox">
+<title>Nearest Mailbox</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2324478f'/%3E%3Cpath d='M9 24V13a7 7 0 0 1 14 0v11z' fill='%23fff'/%3E%3Crect x='11' y='15' width='10' height='2.4' rx='1.2' fill='%2324478f'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&display=swap">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+/* Layout: one column. Locate bar, then map, then ranked list.
+   The list is the primary read; the map is the cross-check. */
+:root {
+  --paper: #eef1f5;
+  --card: #ffffff;
+  --ink: #14213a;
+  --muted: #586580;
+  --line: #cfd6e2;
+  --box-blue: #24478f;
+  --on-blue: #ffffff;
+  --go: #17703f;
+  --go-bg: #e1f3e8;
+  --warn: #8a4b00;
+  --warn-bg: #fbecd3;
+  --font-display: "Barlow Condensed", "Arial Narrow", "Helvetica Neue", Arial, sans-serif;
+  --font-body: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #0f141d;
+    --card: #19202d;
+    --ink: #e8ecf4;
+    --muted: #9ba7be;
+    --line: #2c3649;
+    --box-blue: #86a8f0;
+    --on-blue: #0f141d;
+    --go: #6bd69d;
+    --go-bg: #153224;
+    --warn: #f0b765;
+    --warn-bg: #3a2a10;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: 16px/1.45 var(--font-body);
+}
+.wrap {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 16px 16px 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+h1 {
+  margin: 0;
+  font: 700 30px/1 var(--font-display);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--box-blue);
+}
+.sub { margin: 0; color: var(--muted); font-size: 13px; }
+
+.locate { display: flex; flex-direction: column; gap: 10px; }
+.btn {
+  appearance: none;
+  border: 0;
+  border-radius: 10px;
+  padding: 13px 16px;
+  font: 600 16px/1.2 var(--font-body);
+  cursor: pointer;
+  background: var(--box-blue);
+  color: var(--on-blue);
+}
+.btn:disabled { opacity: 0.6; cursor: progress; }
+.btn.ghost {
+  background: var(--card);
+  color: var(--box-blue);
+  border: 1px solid var(--line);
+  padding: 12px 14px;
+}
+.addr { display: flex; gap: 8px; }
+.addr input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px;
+  font: 16px/1.2 var(--font-body);
+  background: var(--card);
+  color: var(--ink);
+}
+:focus-visible { outline: 3px solid var(--box-blue); outline-offset: 2px; }
+
+.status {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  font-size: 14px;
+}
+.status.is-error { background: var(--warn-bg); color: var(--warn); border-color: transparent; }
+
+.mapwrap { position: relative; border-radius: 12px; overflow: hidden; border: 1px solid var(--line); }
+#map { height: 44vh; min-height: 260px; max-height: 460px; background: var(--card); }
+#searchHere {
+  position: absolute;
+  z-index: 500;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  white-space: nowrap;
+}
+.pin span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50% 50% 50% 6px;
+  background: #24478f;
+  color: #fff;
+  border: 2px solid #fff;
+  font: 700 13px/1 system-ui, sans-serif;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+.pin.is-selected span { background: #c2410c; transform: scale(1.2); }
+.me span {
+  display: block;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #1a73e8;
+  border: 3px solid #fff;
+  box-shadow: 0 0 0 2px rgba(26, 115, 232, 0.35);
+}
+.leaflet-popup-content { font: 14px/1.4 system-ui, sans-serif; margin: 10px 12px; }
+
+h2 {
+  margin: 6px 0 0;
+  font: 600 20px/1.1 var(--font-display);
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+ol.boxes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.box {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-left: 5px solid var(--box-blue);
+  border-radius: 10px;
+  padding: 12px;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 4px 12px;
+  align-items: start;
+  cursor: pointer;
+}
+.box.is-selected { border-color: var(--box-blue); box-shadow: 0 0 0 2px var(--box-blue); }
+.rank {
+  grid-row: span 2;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--box-blue);
+  color: var(--on-blue);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 700 14px/1 var(--font-body);
+}
+.where { font-weight: 600; overflow-wrap: anywhere; }
+.dist {
+  font: 700 24px/1 var(--font-display);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+.meta { color: var(--muted); font-size: 13px; }
+.walk { color: var(--muted); font-size: 13px; text-align: right; white-space: nowrap; }
+.detail {
+  grid-column: 2 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  align-items: center;
+  margin-top: 4px;
+}
+.chip {
+  font-size: 12.5px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.chip.go { background: var(--go-bg); color: var(--go); border-color: transparent; font-weight: 600; }
+.chip.warn { background: var(--warn-bg); color: var(--warn); border-color: transparent; }
+.sched { flex-basis: 100%; color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
+a.dir {
+  margin-left: auto;
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--box-blue);
+  text-decoration: none;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.empty { padding: 16px; border: 1px dashed var(--line); border-radius: 10px; color: var(--muted); }
+footer { color: var(--muted); font-size: 12.5px; display: flex; flex-direction: column; gap: 6px; }
+footer a { color: var(--box-blue); }
+footer p { margin: 0; }
+@media (max-width: 400px) {
+  h1 { font-size: 26px; }
+  .dist { font-size: 21px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  * { scroll-behavior: auto !important; transition: none !important; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Nearest Mailbox</h1>
+    <p class="sub">USPS collection boxes, closest first</p>
+  </header>
+
+  <section class="locate" aria-label="Set a location">
+    <button class="btn" id="locateBtn" type="button">Use my location</button>
+    <form class="addr" id="addrForm">
+      <input id="addr" type="search" inputmode="search" autocomplete="street-address"
+             placeholder="Or type an address or ZIP code" aria-label="Address or ZIP code">
+      <button class="btn ghost" id="addrBtn" type="submit">Search</button>
+    </form>
+  </section>
+
+  <p class="status" id="status" role="status" aria-live="polite">Tap Use my location, or type an address. The browser asks for permission before it shares a location.</p>
+
+  <div class="mapwrap" id="mapwrap">
+    <div id="map" role="application" aria-label="Map of nearby collection boxes"></div>
+    <button class="btn ghost" id="searchHere" type="button" hidden>Search this map area</button>
+  </div>
+
+  <h2 id="listHead" hidden>Closest boxes</h2>
+  <ol class="boxes" id="boxes" aria-labelledby="listHead"></ol>
+
+  <footer>
+    <p>Distances are straight lines. Walk times assume 3 mph.</p>
+    <p>Pickup times come from the schedule that volunteers copied from the box label. Federal holidays are skipped. Check the label on the box before a deadline.</p>
+    <p>Box locations come from <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a>. The data can be incomplete or out of date. This page is not affiliated with USPS. The official locator is at <a href="https://tools.usps.com/find-location.htm">tools.usps.com/find-location.htm</a>.</p>
+  </footer>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+/*LOGIC-START*/
+const Logic = (() => {
+  const EARTH_M = 6371008.8;
+  const rad = d => d * Math.PI / 180;
+
+  function distance(a, b) {
+    const dLat = rad(b.lat - a.lat), dLon = rad(b.lon - a.lon);
+    const h = Math.sin(dLat / 2) ** 2 +
+      Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLon / 2) ** 2;
+    return 2 * EARTH_M * Math.asin(Math.sqrt(h));
+  }
+
+  function bearing(a, b) {
+    const y = Math.sin(rad(b.lon - a.lon)) * Math.cos(rad(b.lat));
+    const x = Math.cos(rad(a.lat)) * Math.sin(rad(b.lat)) -
+      Math.sin(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.cos(rad(b.lon - a.lon));
+    return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+  }
+
+  const COMPASS = ['north', 'northeast', 'east', 'southeast', 'south', 'southwest', 'west', 'northwest'];
+  const compass = deg => COMPASS[Math.round(deg / 45) % 8];
+
+  function formatDistance(m) {
+    const ft = m * 3.28084;
+    if (ft < 528) return Math.max(10, Math.round(ft / 10) * 10) + ' ft';
+    const mi = m / 1609.344;
+    return (mi < 10 ? mi.toFixed(1) : String(Math.round(mi))) + ' mi';
+  }
+
+  const walkMinutes = m => Math.max(1, Math.round(m / 80));
+
+  // 'usps' | 'untagged' | 'other'. OpenStreetMap also holds FedEx and UPS drop boxes.
+  function classify(tags) {
+    tags = tags || {};
+    const wd = [tags['operator:wikidata'], tags['brand:wikidata']].filter(Boolean);
+    const text = [tags.operator, tags.brand, tags.name, tags.short_name].filter(Boolean).join(' | ');
+    if (wd.includes('Q668687') ||
+        /\busps\b|\bu\.?\s?s\.?\s+postal|united states postal/i.test(text)) return 'usps';
+    if (tags.operator || tags.brand || wd.length) return 'other';
+    if (/fedex|\bups\b|dhl|amazon/i.test(text)) return 'other';
+    return 'untagged';
+  }
+
+  function nthWeekday(year, month, weekday, n) {
+    if (n > 0) {
+      const first = new Date(year, month, 1).getDay();
+      return 1 + ((weekday - first + 7) % 7) + (n - 1) * 7;
+    }
+    const last = new Date(year, month + 1, 0);
+    return last.getDate() - ((last.getDay() - weekday + 7) % 7);
+  }
+
+  // Federal holidays on which USPS does not collect mail.
+  function isPostalHoliday(d) {
+    const y = d.getFullYear(), m = d.getMonth(), day = d.getDate(), wd = d.getDay();
+    const fixed = [[0, 1], [5, 19], [6, 4], [10, 11], [11, 25]];
+    for (const [fm, fd] of fixed) {
+      if (m === fm && day === fd) return true;
+      if (wd === 1) { // a Sunday holiday is observed on Monday
+        const prev = new Date(y, m, day - 1);
+        if (prev.getMonth() === fm && prev.getDate() === fd) return true;
+      }
+    }
+    if (m === 0 && day === nthWeekday(y, 0, 1, 3)) return true;   // MLK Day
+    if (m === 1 && day === nthWeekday(y, 1, 1, 3)) return true;   // Presidents Day
+    if (m === 4 && day === nthWeekday(y, 4, 1, -1)) return true;  // Memorial Day
+    if (m === 8 && day === nthWeekday(y, 8, 1, 1)) return true;   // Labor Day
+    if (m === 9 && day === nthWeekday(y, 9, 1, 2)) return true;   // Columbus Day
+    if (m === 10 && day === nthWeekday(y, 10, 4, 4)) return true; // Thanksgiving
+    return false;
+  }
+
+  const DAYS = { Su: 0, Mo: 1, Tu: 2, We: 3, Th: 4, Fr: 5, Sa: 6 };
+  const DAY_RULE = /^((?:(?:Mo|Tu|We|Th|Fr|Sa|Su|PH)(?:\s*-\s*(?:Mo|Tu|We|Th|Fr|Sa|Su))?\s*,?\s*)+)?\s*(.*)$/;
+
+  // Reads the OpenStreetMap collection_times format, for example "Mo-Fr 16:30; Sa 11:30".
+  // Returns null when the text does not fit the format.
+  function parseCollectionTimes(str) {
+    if (!str) return null;
+    const sched = { days: [[], [], [], [], [], [], []], ph: null };
+    let any = false;
+    for (const raw of String(str).split(';')) {
+      const rule = raw.trim();
+      if (!rule) continue;
+      const m = rule.match(DAY_RULE);
+      if (!m) return null;
+      const daySpec = (m[1] || '').trim().replace(/,$/, '');
+      const rest = m[2].trim();
+      let days = [], ph = false;
+      if (!daySpec) {
+        days = [0, 1, 2, 3, 4, 5, 6];
+      } else {
+        for (const part of daySpec.split(',')) {
+          const p = part.trim();
+          if (!p) continue;
+          if (p === 'PH') { ph = true; continue; }
+          const [a, b] = p.split('-').map(s => s.trim());
+          if (!(a in DAYS)) return null;
+          if (b === undefined) { days.push(DAYS[a]); continue; }
+          if (!(b in DAYS)) return null;
+          for (let i = DAYS[a]; ; i = (i + 1) % 7) { days.push(i); if (i === DAYS[b]) break; }
+        }
+      }
+      let times = [];
+      if (!/^(off|closed)$/i.test(rest)) {
+        for (const t of rest.split(',')) {
+          const tm = t.trim().match(/^(\d{1,2}):(\d{2})(?:\s*-\s*\d{1,2}:\d{2})?$/);
+          if (!tm) return null;
+          times.push(Number(tm[1]) * 60 + Number(tm[2]));
+        }
+        times.sort((x, y) => x - y);
+      }
+      for (const d of days) sched.days[d] = times;
+      if (ph) sched.ph = times;
+      any = true;
+    }
+    return any ? sched : null;
+  }
+
+  function nextPickup(sched, now) {
+    for (let i = 0; i < 8; i++) {
+      const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + i);
+      const times = isPostalHoliday(d) ? (sched.ph || []) : sched.days[d.getDay()];
+      for (const t of times) {
+        const when = new Date(d.getFullYear(), d.getMonth(), d.getDate(), Math.floor(t / 60), t % 60);
+        if (when > now) return { when, dayOffset: i };
+      }
+    }
+    return null;
+  }
+
+  function formatPickup(p) {
+    const time = p.when.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    if (p.dayOffset === 0) return 'today ' + time;
+    if (p.dayOffset === 1) return 'tomorrow ' + time;
+    return p.when.toLocaleDateString('en-US', { weekday: 'short' }) + ' ' + time;
+  }
+
+  // Names of the one or two streets closest to a point, from Overpass ways with geometry.
+  function nearestStreets(pt, ways, limitM) {
+    const kx = Math.cos(rad(pt.lat)) * 111320, ky = 110540;
+    const best = new Map();
+    for (const w of ways) {
+      const name = w.tags && w.tags.name;
+      const g = w.geometry;
+      if (!name || !g || g.length < 2) continue;
+      let min = Infinity;
+      for (let i = 0; i < g.length - 1; i++) {
+        const ax = (g[i].lon - pt.lon) * kx, ay = (g[i].lat - pt.lat) * ky;
+        const bx = (g[i + 1].lon - pt.lon) * kx, by = (g[i + 1].lat - pt.lat) * ky;
+        const dx = bx - ax, dy = by - ay;
+        const len2 = dx * dx + dy * dy;
+        const t = len2 ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / len2)) : 0;
+        min = Math.min(min, Math.hypot(ax + t * dx, ay + t * dy));
+      }
+      if (min <= limitM && min < (best.has(name) ? best.get(name) : Infinity)) best.set(name, min);
+    }
+    return [...best.entries()].sort((a, b) => a[1] - b[1]).slice(0, 2).map(e => e[0]);
+  }
+
+  return { distance, bearing, compass, formatDistance, walkMinutes, classify,
+           isPostalHoliday, parseCollectionTimes, nextPickup, formatPickup, nearestStreets };
+})();
+/*LOGIC-END*/
+
+(() => {
+  const OVERPASS = [
+    'https://overpass-api.de/api/interpreter',
+    'https://overpass.private.coffee/api/interpreter'
+  ];
+  const RADII_M = [2000, 6000, 20000];
+  const WANT = 6;        // widen the search until this many boxes are found
+  const SHOW = 15;       // list length
+  const STREETS_FOR = 10; // boxes that get a street label
+  const STORE_KEY = 'nearest-mailbox:last';
+
+  const $ = id => document.getElementById(id);
+  const statusEl = $('status'), listEl = $('boxes'), listHead = $('listHead');
+  const locateBtn = $('locateBtn'), addrForm = $('addrForm'), addrInput = $('addr');
+  const searchHereBtn = $('searchHere');
+
+  let origin = null;      // {lat, lon, label, accuracy}
+  let boxes = [];
+  let searchToken = 0;
+  let map = null, meMarker = null, accCircle = null, pinLayer = null;
+  let programmaticMove = false;
+  const pins = new Map();
+
+  function el(tag, props, ...kids) {
+    const n = document.createElement(tag);
+    if (props) for (const [k, v] of Object.entries(props)) {
+      if (k === 'class') n.className = v;
+      else if (k === 'text') n.textContent = v;
+      else n.setAttribute(k, v);
+    }
+    for (const kid of kids) if (kid) n.append(kid);
+    return n;
+  }
+
+  function setStatus(text, isError) {
+    statusEl.textContent = text;
+    statusEl.classList.toggle('is-error', Boolean(isError));
+  }
+
+  function remember(o) {
+    try { localStorage.setItem(STORE_KEY, JSON.stringify({ lat: o.lat, lon: o.lon, label: o.label })); } catch (e) {}
+  }
+  function recall() {
+    try {
+      const o = JSON.parse(localStorage.getItem(STORE_KEY));
+      if (o && Number.isFinite(o.lat) && Number.isFinite(o.lon)) return o;
+    } catch (e) {}
+    return null;
+  }
+
+  // ---------- map ----------
+  function initMap() {
+    if (typeof L === 'undefined') { $('mapwrap').hidden = true; return; }
+    map = L.map('map', { zoomControl: true }).setView([39.5, -98.35], 4);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      referrerPolicy: 'strict-origin-when-cross-origin',
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+    }).addTo(map);
+    pinLayer = L.layerGroup().addTo(map);
+    map.on('moveend', () => {
+      if (programmaticMove) { programmaticMove = false; return; }
+      if (!origin) { searchHereBtn.hidden = map.getZoom() < 12; return; }
+      const c = map.getCenter();
+      searchHereBtn.hidden = Logic.distance(origin, { lat: c.lat, lon: c.lng }) < 300;
+    });
+  }
+
+  function moveMap(fn) { if (map) { programmaticMove = true; fn(); } }
+
+  function drawOrigin() {
+    if (!map) return;
+    if (meMarker) meMarker.remove();
+    if (accCircle) accCircle.remove();
+    meMarker = L.marker([origin.lat, origin.lon], {
+      icon: L.divIcon({ className: 'me', html: '<span></span>', iconSize: [18, 18], iconAnchor: [9, 9] }),
+      keyboard: false, zIndexOffset: 1000
+    }).addTo(map);
+    accCircle = origin.accuracy && origin.accuracy > 30
+      ? L.circle([origin.lat, origin.lon], { radius: origin.accuracy, weight: 1, color: '#1a73e8', fillOpacity: 0.08 }).addTo(map)
+      : null;
+  }
+
+  function drawPins() {
+    if (!map) return;
+    pinLayer.clearLayers();
+    pins.clear();
+    boxes.forEach((b, i) => {
+      const m = L.marker([b.lat, b.lon], {
+        icon: L.divIcon({ className: 'pin', html: '<span>' + (i + 1) + '</span>', iconSize: [28, 28], iconAnchor: [14, 14] }),
+        title: 'Box ' + (i + 1)
+      }).addTo(pinLayer);
+      m.on('click', () => select(b.id, 'map'));
+      pins.set(b.id, m);
+    });
+    const pts = boxes.slice(0, 6).map(b => [b.lat, b.lon]);
+    pts.push([origin.lat, origin.lon]);
+    moveMap(() => map.fitBounds(L.latLngBounds(pts), { padding: [36, 36], maxZoom: 17 }));
+  }
+
+  // ---------- data ----------
+  async function overpass(query) {
+    let lastErr = new Error('No Overpass server answered');
+    for (const url of OVERPASS) {
+      const ctl = new AbortController();
+      const timer = setTimeout(() => ctl.abort(), 25000);
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'data=' + encodeURIComponent(query),
+          signal: ctl.signal
+        });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const json = await res.json();
+        return json.elements || [];
+      } catch (e) {
+        lastErr = e;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    throw lastErr;
+  }
+
+  async function findBoxes(o) {
+    let found = [], radius = RADII_M[0];
+    for (radius of RADII_M) {
+      const q = '[out:json][timeout:20];node["amenity"="post_box"](around:' + radius + ',' +
+        o.lat.toFixed(6) + ',' + o.lon.toFixed(6) + ');out body;';
+      const els = await overpass(q);
+      found = els
+        .filter(e => e.type === 'node' && Number.isFinite(e.lat) && Number.isFinite(e.lon))
+        .map(e => ({ id: e.id, lat: e.lat, lon: e.lon, tags: e.tags || {}, kind: Logic.classify(e.tags) }))
+        .filter(b => b.kind !== 'other');
+      if (found.length >= WANT) break;
+    }
+    for (const b of found) {
+      b.dist = Logic.distance(o, b);
+      b.dir = Logic.compass(Logic.bearing(o, b));
+      b.sched = Logic.parseCollectionTimes(b.tags.collection_times);
+    }
+    found.sort((a, b) => a.dist - b.dist);
+    return { list: found.slice(0, SHOW), total: found.length, radius };
+  }
+
+  async function labelStreets(token) {
+    const targets = boxes.slice(0, STREETS_FOR).filter(b => !tagAddress(b.tags));
+    if (!targets.length) return;
+    const parts = targets.map(b => 'way(around:45,' + b.lat.toFixed(6) + ',' + b.lon.toFixed(6) + ')["highway"]["name"];').join('');
+    let ways;
+    try { ways = await overpass('[out:json][timeout:20];(' + parts + ');out tags geom;'); }
+    catch (e) { return; } // street names are an extra; the list is usable without them
+    if (token !== searchToken) return;
+    for (const b of targets) {
+      const names = Logic.nearestStreets(b, ways, 45);
+      if (names.length) b.street = names.join(' & ');
+    }
+    renderList();
+  }
+
+  function tagAddress(t) {
+    if (t['addr:street']) return ((t['addr:housenumber'] || '') + ' ' + t['addr:street']).trim();
+    return '';
+  }
+
+  // ---------- list ----------
+  function directionsUrl(b) {
+    const ll = b.lat.toFixed(6) + ',' + b.lon.toFixed(6);
+    return /iPhone|iPad|iPod|Macintosh/.test(navigator.userAgent)
+      ? 'https://maps.apple.com/?daddr=' + ll + '&dirflg=w'
+      : 'https://www.google.com/maps/dir/?api=1&destination=' + ll + '&travelmode=walking';
+  }
+
+  function boxTitle(b) {
+    return tagAddress(b.tags) || b.street || b.tags.description || 'Collection box';
+  }
+
+  function pickupChip(b, now) {
+    if (!b.tags.collection_times) return el('span', { class: 'chip', text: 'Pickup times not mapped' });
+    if (!b.sched) return null;
+    const p = Logic.nextPickup(b.sched, now);
+    if (!p) return el('span', { class: 'chip', text: 'No pickup in the next week' });
+    return el('span', { class: 'chip' + (p.dayOffset === 0 ? ' go' : ''), text: 'Next pickup ' + Logic.formatPickup(p) });
+  }
+
+  function renderList() {
+    const now = new Date();
+    listEl.replaceChildren();
+    listHead.hidden = boxes.length === 0;
+    if (!boxes.length) return;
+    boxes.forEach((b, i) => {
+      const detail = el('div', { class: 'detail' },
+        pickupChip(b, now),
+        b.tags.drive_through === 'yes' ? el('span', { class: 'chip', text: 'Drive-up' }) : null,
+        b.kind === 'untagged' ? el('span', { class: 'chip warn', text: 'Carrier not recorded' }) : null,
+        el('a', { class: 'dir', href: directionsUrl(b), target: '_blank', rel: 'noopener', text: 'Directions' }),
+        b.tags.collection_times ? el('div', { class: 'sched', text: 'Schedule: ' + b.tags.collection_times }) : null
+      );
+      const li = el('li', { class: 'box', 'data-id': String(b.id), tabindex: '0' },
+        el('span', { class: 'rank', text: String(i + 1) }),
+        el('span', { class: 'where', text: boxTitle(b) }),
+        el('span', { class: 'dist', text: Logic.formatDistance(b.dist) }),
+        el('span', { class: 'meta', text: 'To the ' + b.dir }),
+        el('span', { class: 'walk', text: Logic.walkMinutes(b.dist) + ' min walk' }),
+        detail
+      );
+      li.addEventListener('click', ev => { if (!ev.target.closest('a')) select(b.id, 'list'); });
+      li.addEventListener('keydown', ev => { if (ev.key === 'Enter' && ev.target === li) select(b.id, 'list'); });
+      listEl.append(li);
+    });
+    if (selectedId !== null) markSelected();
+  }
+
+  let selectedId = null;
+  function markSelected() {
+    for (const li of listEl.children) li.classList.toggle('is-selected', li.dataset.id === String(selectedId));
+    for (const [id, m] of pins) {
+      const node = m.getElement();
+      if (node) node.classList.toggle('is-selected', id === selectedId);
+    }
+  }
+  function select(id, from) {
+    selectedId = id;
+    markSelected();
+    const b = boxes.find(x => x.id === id);
+    if (!b) return;
+    if (from === 'list' && map) {
+      moveMap(() => map.setView([b.lat, b.lon], Math.max(map.getZoom(), 16)));
+      $('mapwrap').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+    if (from === 'map') {
+      const li = listEl.querySelector('[data-id="' + id + '"]');
+      if (li) li.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  }
+
+  // ---------- flow ----------
+  async function search(o, note) {
+    const token = ++searchToken;
+    origin = o;
+    selectedId = null;
+    searchHereBtn.hidden = true;
+    drawOrigin();
+    moveMap(() => map.setView([o.lat, o.lon], 15));
+    setStatus('Looking for collection boxes near ' + o.label + '…');
+    let result;
+    try {
+      result = await findBoxes(o);
+    } catch (e) {
+      if (token !== searchToken) return;
+      setStatus('The map data server did not answer (' + (e.name === 'AbortError' ? 'timed out' : e.message) +
+        '). Wait a minute, then try again.', true);
+      return;
+    }
+    if (token !== searchToken) return;
+    boxes = result.list;
+    renderList();
+    if (!boxes.length) {
+      listEl.append(el('li', { class: 'empty', text: 'No collection boxes are mapped within ' +
+        Logic.formatDistance(result.radius) + ' of ' + o.label + '. The official USPS locator in the footer may list some.' }));
+      setStatus('No mapped boxes near ' + o.label + '.', true);
+      return;
+    }
+    drawPins();
+    const acc = o.accuracy ? ' Location accuracy: about ' + Logic.formatDistance(o.accuracy) + '.' : '';
+    setStatus((note || '') + result.total + ' mapped ' + (result.total === 1 ? 'box' : 'boxes') + ' within ' +
+      Logic.formatDistance(result.radius) + ' of ' + o.label + '. Closest: ' +
+      Logic.formatDistance(boxes[0].dist) + ' to the ' + boxes[0].dir + '.' + acc);
+    labelStreets(token);
+  }
+
+  function locate() {
+    if (!window.isSecureContext || !navigator.geolocation) {
+      setStatus('This browser shares a location only with pages served over HTTPS. Type an address instead, or host this file on an HTTPS site.', true);
+      return;
+    }
+    locateBtn.disabled = true;
+    setStatus('Waiting for the device location…');
+    navigator.geolocation.getCurrentPosition(pos => {
+      locateBtn.disabled = false;
+      const o = { lat: pos.coords.latitude, lon: pos.coords.longitude, accuracy: pos.coords.accuracy, label: 'your location' };
+      remember(o);
+      search(o);
+    }, err => {
+      locateBtn.disabled = false;
+      const why = err.code === 1
+        ? 'Location permission is off for this page. Allow location in the browser settings, or type an address.'
+        : err.code === 3
+          ? 'The device did not report a location in time. Try again, or type an address.'
+          : 'The device could not find a location. Try again, or type an address.';
+      setStatus(why, true);
+    }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 });
+  }
+
+  async function geocode(text) {
+    $('addrBtn').disabled = true;
+    setStatus('Looking up "' + text + '"…');
+    try {
+      const res = await fetch('https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&countrycodes=us&q=' + encodeURIComponent(text));
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const hits = await res.json();
+      if (!hits.length) { setStatus('No US address matched "' + text + '". Add a city or ZIP code.', true); return; }
+      const label = String(hits[0].display_name || text).split(',').slice(0, 2).join(',').trim();
+      const o = { lat: Number(hits[0].lat), lon: Number(hits[0].lon), label };
+      remember(o);
+      search(o);
+    } catch (e) {
+      setStatus('The address lookup did not answer (' + e.message + '). Try again in a minute.', true);
+    } finally {
+      $('addrBtn').disabled = false;
+    }
+  }
+
+  locateBtn.addEventListener('click', locate);
+  addrForm.addEventListener('submit', ev => {
+    ev.preventDefault();
+    const text = addrInput.value.trim();
+    if (text) geocode(text);
+  });
+  searchHereBtn.addEventListener('click', () => {
+    const c = map.getCenter();
+    const o = { lat: c.lat, lon: c.lng, label: 'the map center' };
+    search(o);
+  });
+
+  initMap();
+  const last = recall();
+  if (last) search({ lat: last.lat, lon: last.lon, label: last.label === 'your location' ? 'your last location' : last.label },
+    last.label === 'your location' ? 'Showing your last location. Tap Use my location to update. ' : '');
+})();
+</script>
+</body>
+</html>
